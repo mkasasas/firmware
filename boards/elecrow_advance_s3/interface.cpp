@@ -39,7 +39,8 @@ void _post_setup_gpio() {
         Serial.println("Touch IC not Started");
     } else {
         Serial.println("Touch IC Started");
-        touch.setRotation(bruceConfig.rotation);
+        // این همون خطیه که ارور داد! Pins جا افتاده بود که اضافه شد 👇
+        touch.setRotation(bruceConfigPins.rotation);
     }
 
     // تنظیم PWM نور صفحه (سازگار با هر دو نسخه هسته ESP32)
