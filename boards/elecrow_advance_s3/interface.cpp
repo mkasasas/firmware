@@ -1,72 +1,69 @@
-#include "core/bus_HAL.h"
 #include "core/powerSave.h"
 #include "core/utils.h"
-#include <Arduino.h>
-#include <Wire.h>
 #include <interface.h>
+#include <SPI.h>
+#include <XPT2046_Touchscreen.h>
 
-// =============================================================================
-//  CrowPanel Advance 3.5" (ESP32-S3) interface
-//  - Display: ILI9488 over SPI (handled by TFT_eSPI)
-//  - Touch:   GT911 capacitive, directly on I2C (SDA=15, SCL=16, INT=47),
-//             no IO expander, no dedicated RST line.
-//  - Backlight: direct PWM on GPIO38.
-// =============================================================================
-
-#if defined(HAS_CAPACITIVE_TOUCH) && defined(TOUCH_GT911_I2C)
-#include "TouchDrvGT911.hpp"
-TouchDrvGT911 touch;
-struct TouchPointPro {
-    int16_t x = 0;
-    int16_t y = 0;
-};
-#endif
+// ساخت یک درگاه SPI کاملا مستقل برای تاچ تا به صفحه نمایش دست نزنه
+SPIClass touchSPI(FSPI);
+XPT2046_Touchscreen touch(TOUCH_CS, TOUCH_IRQ);
 
 /***************************************************************************************
 ** Function name: _setup_gpio()
+** Location: main.cpp
+** Description:   initial setup for the device
 ***************************************************************************************/
 void _setup_gpio() {
+    // روشن کردن فوری نور پس زمینه صفحه نمایش
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, HIGH);
+
+    // بالا نگه داشتن CS کارت حافظه و تاچ برای جلوگیری از تداخل موقع بوت
+    pinMode(TOUCH_CS, OUTPUT);
+    digitalWrite(TOUCH_CS, HIGH);
+    pinMode(SDCARD_CS, OUTPUT);
+    digitalWrite(SDCARD_CS, HIGH);
+
     bruceConfig.colorInverted = 0;
-
-#if defined(HAS_CAPACITIVE_TOUCH) && defined(TOUCH_GT911_I2C)
-    // Bring up the I2C bus the GT911 lives on.
-    setSysI2CBus(&Wire1);
-    Wire1.begin(SYS_I2C_SDA, SYS_I2C_SCL);
-
-    // GT911 power-on reset sequence. No RST line on this board, so hold INT low
-    // briefly to keep address 0x5D, then release it as an input.
-    pinMode(BOARD_TOUCH_INT, OUTPUT);
-    digitalWrite(BOARD_TOUCH_INT, LOW);
-    delay(10);
-    pinMode(BOARD_TOUCH_INT, INPUT);
-    delay(50);
-
-    // No reset line available -> pass -1 for RST.
-    touch.setPins(-1, BOARD_TOUCH_INT);
-    if (!touch.begin(Wire1, GT911_SLAVE_ADDRESS_L, SYS_I2C_SDA, SYS_I2C_SCL)) {
-        Serial.println("Failed to find GT911 touch - check wiring!");
-    } else {
-        Serial.println("GT911 touch started");
-    }
-#endif
 }
 
 /***************************************************************************************
 ** Function name: _post_setup_gpio()
+** Location: main.cpp
+** Description:   second stage gpio setup to make a few functions work
 ***************************************************************************************/
 void _post_setup_gpio() {
-    pinMode(TFT_BL, OUTPUT);
+    // راه اندازی درگاه اختصاصی تاچ روی پین های 12 و 13 و 11 و 46
+    touchSPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
+    if (!touch.begin(touchSPI)) {
+        Serial.println("Touch IC not Started");
+    } else {
+        Serial.println("Touch IC Started");
+        touch.setRotation(bruceConfig.rotation);
+    }
+
+    // تنظیم PWM نور صفحه (سازگار با هر دو نسخه هسته ESP32)
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
     ledcAttach(TFT_BL, TFT_BRIGHT_FREQ, TFT_BRIGHT_Bits);
     ledcWrite(TFT_BL, 255);
+#else
+    ledcSetup(TFT_BRIGHT_CHANNEL, TFT_BRIGHT_FREQ, TFT_BRIGHT_Bits);
+    ledcAttachPin(TFT_BL, TFT_BRIGHT_CHANNEL);
+    ledcWrite(TFT_BRIGHT_CHANNEL, 255);
+#endif
 }
 
 /***************************************************************************************
 ** Function name: getBattery()
+** location: display.cpp
+** Description:   Delivers the battery value from 1-100
 ***************************************************************************************/
-int getBattery() { return 100; }
+int getBattery() { return 0; }
 
 /*********************************************************************
-** Function: _setBrightness
+** Function: setBrightness
+** location: settings.cpp
+** set brightness value
 **********************************************************************/
 void _setBrightness(uint8_t brightval) {
     int dutyCycle;
@@ -76,87 +73,61 @@ void _setBrightness(uint8_t brightval) {
     else if (brightval == 25) dutyCycle = 20;
     else if (brightval == 0) dutyCycle = 0;
     else dutyCycle = ((brightval * 255) / 100);
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
     ledcWrite(TFT_BL, dutyCycle);
-}
-
-/*********************************************************************
-** Function: InputHandler (GT911 capacitive)
-**********************************************************************/
-void InputHandler(void) {
-#if defined(HAS_CAPACITIVE_TOUCH) && defined(TOUCH_GT911_I2C)
-    static long d_tmp = 0;
-    if (millis() - d_tmp > 200 || LongPress) {
-        static unsigned long tm = millis();
-        TouchPointPro t;
-        uint8_t touched = 0;
-        static uint8_t rot = 5;
-
-        if (rot != bruceConfigPins.rotation) {
-            if (bruceConfigPins.rotation == 1) {
-                touch.setMaxCoordinates(TFT_HEIGHT, TFT_WIDTH);
-                touch.setSwapXY(true);
-                touch.setMirrorXY(false, true);
-            }
-            if (bruceConfigPins.rotation == 3) {
-                touch.setMaxCoordinates(TFT_HEIGHT, TFT_WIDTH);
-                touch.setSwapXY(true);
-                touch.setMirrorXY(true, false);
-            }
-            if (bruceConfigPins.rotation == 0) {
-                touch.setMaxCoordinates(TFT_WIDTH, TFT_HEIGHT);
-                touch.setSwapXY(false);
-                touch.setMirrorXY(false, false);
-            }
-            if (bruceConfigPins.rotation == 2) {
-                touch.setMaxCoordinates(TFT_WIDTH, TFT_HEIGHT);
-                touch.setSwapXY(false);
-                touch.setMirrorXY(true, true);
-            }
-            rot = bruceConfigPins.rotation;
-        }
-
-        static bool lastTouchState = false;
-        static unsigned long lastTouchTime = 0;
-
-        touched = touch.getPoint(&t.x, &t.y);
-        bool currentTouchState = touched > 0;
-
-        if (currentTouchState && !lastTouchState && (millis() - lastTouchTime) > 100) {
-            lastTouchTime = millis();
-        } else if (!currentTouchState || lastTouchState) {
-            touched = 0;
-        }
-        lastTouchState = currentTouchState;
-
-        if (((millis() - tm) > 190 || LongPress) && touched) {
-            tm = millis();
-            if (!wakeUpScreen()) AnyKeyPress = true;
-            else goto END;
-
-            touchPoint.x = t.x;
-            touchPoint.y = t.y;
-            touchPoint.pressed = true;
-            touchHeatMap(touchPoint);
-        END:
-            d_tmp = millis();
-        }
-    }
 #else
-    checkPowerSaveTime();
-    PrevPress = false;
-    NextPress = false;
-    SelPress = false;
-    AnyKeyPress = false;
-    EscPress = false;
+    ledcWrite(TFT_BRIGHT_CHANNEL, dutyCycle);
 #endif
 }
 
 /*********************************************************************
-** Function: powerOff
+** Function: InputHandler
+** Handles the variables PrevPress, NextPress, SelPress, AnyKeyPress and EscPress
 **********************************************************************/
-void powerOff() {}
+void InputHandler(void) {
+    static unsigned long tm = millis();
+    if (!(millis() - tm > 200 || LongPress)) return;
+
+    if (touch.touched()) {
+        TS_Point p = touch.getPoint();
+
+        // تبدیل مختصات خام تاچ XPT2046 (بین 200 تا 3800) به اندازه صفحه (480x320)
+        int tx = map(p.x, 200, 3800, 0, tftWidth - 1);
+        int ty = map(p.y, 200, 3800, 0, tftHeight - 1);
+
+        // محدود کردن اعداد داخل کادر صفحه
+        if (tx < 0) tx = 0;
+        if (tx >= tftWidth) tx = tftWidth - 1;
+        if (ty < 0) ty = 0;
+        if (ty >= tftHeight) ty = tftHeight - 1;
+
+        tm = millis();
+        if (!wakeUpScreen()) AnyKeyPress = true;
+        else return;
+
+        touchPoint.x = tx;
+        touchPoint.y = ty;
+        touchPoint.pressed = true;
+        touchHeatMap(touchPoint);
+    } else {
+        touchPoint.pressed = false;
+    }
+}
+
+/*********************************************************************
+** Function: powerOff
+** location: mykeyboard.cpp
+** Turns off the device (or try to)
+**********************************************************************/
+void powerOff() {
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, LOW);
+    esp_deep_sleep_start();
+}
 
 /*********************************************************************
 ** Function: checkReboot
+** location: mykeyboard.cpp
+** Btn logic to turn off the device (name is odd btw)
 **********************************************************************/
 void checkReboot() {}
