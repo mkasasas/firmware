@@ -15,7 +15,7 @@ on:
         type: choice
         options:
            options:
-         - elecrow-advance-35-s3
+          - elecrow-advance-35-s3
           - m5stack-cardputer
           - "m5stack-cardputer"
           - "m5stack-cplus2"
